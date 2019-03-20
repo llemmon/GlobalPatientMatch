@@ -1,4 +1,4 @@
-package externalSortPackage;
+package org.linkja.matching;
 
 //classes used
 //import org.apache.commons.io.FilenameUtils;

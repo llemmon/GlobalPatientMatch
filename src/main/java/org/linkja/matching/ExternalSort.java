@@ -1,4 +1,4 @@
-package externalSortPackage;
+package org.linkja.matching;
 
 //filename: ExternalSort.java
 import java.io.BufferedReader;

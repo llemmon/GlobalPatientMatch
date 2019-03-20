@@ -1,4 +1,4 @@
-package externalSortPackage;
+package org.linkja.matching;
 
 /**
  * Simple class used to estimate memory usage.
