@@ -99,10 +99,10 @@ public class GlobalMatchSqlite {
 	private static final String nullEntry = "NULL";
 	private static boolean tempTableAllKeyCreated = false;
 	private static String tempMessage;
-	private final static boolean quickTest = true;
 	
 	private Integer patGlobalIdCount = 0;
 	private Map<Integer, Set<Integer>> patGlobalIdMap;	// holds patient matches
+	private Map<Integer, Integer> patGlobalIdMapLink;	// holds link to patient matches
 	private List<String> exclusionPats;					// holds pats with exclusion flag
 	private static List<Integer> matchSequence;			// holds match rules to run
 
@@ -122,6 +122,12 @@ public class GlobalMatchSqlite {
 		matchRule.put(11, "7 matchto 7");
 		matchRule.put(12, "8 matchto 8");
 	}
+	
+	class GlobalIdGroup {
+		Integer groupGlobalId;
+		Set<Integer> groupSet;
+	}
+	
 	// constructor
 	public GlobalMatchSqlite(String projectRoot, Integer idSeed) {
 		System.out.println("Project Root path passed to constructor: " + projectRoot);
@@ -175,8 +181,7 @@ public class GlobalMatchSqlite {
 			config.setJournalMode(SQLiteConfig.JournalMode.OFF);
 			config.setSynchronous(SQLiteConfig.SynchronousMode.OFF);
 			config.setLockingMode(SQLiteConfig.LockingMode.EXCLUSIVE);
-			//config.setTransactionMode(SQLiteConfig.TransactionMode.IMMEDIATE);
-			//config.setEncoding(SQLiteConfig.Encoding.UTF_8);
+			config.setTransactionMode(SQLiteConfig.TransactionMode.EXCLUSIVE);
 		} catch (SQLException e) {
 			System.out.println(e.getMessage());
 			if (e.getMessage().contains(SQL_Exception1)) { stopProcess(e.getMessage()); }
@@ -298,11 +303,6 @@ public class GlobalMatchSqlite {
 						commitCount++;
 						if (commitCount % batchSize == 0) {
 							db.commit();	// if at batchSize then do commit since autocommit is off
-						}
-						if (quickTest) {
-							if (commitCount > 100000) {
-								break;
-							}
 						}
 					} catch (SQLException e) {
 						System.out.println(e.getMessage());
@@ -534,12 +534,11 @@ public class GlobalMatchSqlite {
 					writeLog(logInfo, recordsRead+" records transferred to GlobalMatch", true);
 				}
 			}
-			try {
-				db.commit();
-				db.setAutoCommit(true);
-			} catch (SQLException e) {
-				e.printStackTrace();
+			if (resultSet1 != null) {
+				resultSet1.close();
 			}
+			db.commit();
+			db.setAutoCommit(true);
 		} catch (SQLException e) {
 			System.out.println(e.getMessage());
 			if (e.getMessage().contains(SQL_Exception1)) { stopProcess(e.getMessage()); }
@@ -573,7 +572,9 @@ public class GlobalMatchSqlite {
 		if (db == null) {
 			connectDb();				// connect to database if no connection yet
 		}
-		patGlobalIdMap = new HashMap<Integer, Set<Integer>>(500000);	//declare again to clear previous list
+		patGlobalIdMap = new HashMap<Integer, Set<Integer>>(750000, 0.90f);	//declare initial capacity and load factor
+		patGlobalIdMapLink = new HashMap<Integer, Integer>(750000, 0.90f);	//declare initial capacity and load factor
+		
 
 		resetGlobalIds();				// go reset globalIds in GlobalMatch to 0
 		assignPatientAliasGlobalIds();	// assign Global Ids to derived patients (aliases) first
@@ -691,58 +692,28 @@ public class GlobalMatchSqlite {
 		if (patGlobalIdMapCount == 0) {		// quit now if no matched patients
 			return;
 		}
-		// consolidate matching patients from patGlobalIdMap into lists where each pat included in only 1 group
-		ArrayList<Set<Integer>> patIdArray = new ArrayList<Set<Integer>>(100000);	// holds match groups of unique pats
-		
-		//Integer key1 = patGlobalIdMap.keySet().stream().findFirst().get();		//key of the first entry
-		Set<Integer> patSet1 = patGlobalIdMap.values().stream().findFirst().get();	//get pat set of first entry
-		patIdArray.add(patSet1);		// add first patients to consolidated list
+		// consolidate matching patients from patGlobalIdMap
+		ArrayList<Set<Integer>> patIdArray = new ArrayList<Set<Integer>>(750000);	// holds match groups of unique pats
 
 		patGlobalIdMapCount = 0;
 		for (Map.Entry<Integer, Set<Integer>> entry : patGlobalIdMap.entrySet()) { // loop thru each entry in map
 			patGlobalIdMapCount++;
-			if (patGlobalIdMapCount % 50000 == 0) {
-				tempMessage = "checking match group "+patGlobalIdMapCount+ " consolidated array size: " +patIdArray.size();
-				writeLog(logInfo, tempMessage, true);
-			}
 			//Integer key1 = entry.getKey();
-			Set<Integer> patSet = entry.getValue();				// get matching pats in this group
-			
-			boolean entryFound = false;
-			for (int w = 0; w < patIdArray.size(); w++ ) {	// look thru consolidated groups, see if pats exist
-				Set<Integer> patSetConsol = patIdArray.get( w ); 	// get set of previously consolidated group
-
-				for (Integer element : patSet) {			// loop thru consolidated pats to see if found
-					if (patSetConsol.contains( element )) {	// if this pat already in consolidated set
-						patSetConsol.addAll( patSet );		// add this set to group, duplicates are eliminated
-						patIdArray.set(w, patSetConsol);	// put back in consolidated array, overwriting previous
-						entryFound = true;
-						break;								// found entry so exit loop
-					}
-				}
-				if (entryFound) {
-					break;									// exit entire loop if found entry
-				}
-			}
-			if (!entryFound) {
-				patIdArray.add(patSet);			// if no entry found, add new entry in consolidated array
-			}
+			Set<Integer> patSet = entry.getValue();	// get matching pats in this group
+			patIdArray.add(patSet);					// add new entry in consolidated array
 		}
-		//*** end of pat list consolidation
 		tempMessage = "consolidated matching patient groups to " + patIdArray.size();
 		writeLog(logInfo, tempMessage, true);
 		
 		patGlobalIdMap.clear(); 		// clear hashmap to save memory
-
-		doAutoCommit(false);			// turn off AutoCommit to make storing faster
-		final int batchSize = 1000;		// number of updates before commits
-		int commitCount = 0;
+		patGlobalIdMapLink.clear();		// clear to save memory
+		ArrayList<GlobalIdGroup> globalIdArray = new ArrayList<GlobalIdGroup>(750000); //holds matching pats and globalID
 		StringBuilder sb1 = new StringBuilder();	// holds string with all pat ids of set
 		
 		// loop thru each consolidated set, find any existing global ids, give same global id to all in set
 		for (int x = 0; x < patIdArray.size(); x++ ) {
 			if ( x % 25000 == 0) {
-				tempMessage = "updating globalId for matching patient group " + x;
+				tempMessage = "getting globalId for matching patient group " + x;
 				writeLog(logInfo, tempMessage, true);
 			}
 
@@ -760,7 +731,7 @@ public class GlobalMatchSqlite {
 			Integer maxGlobalId = 0;
 			String sql1 = "SELECT globalId FROM GlobalMatch WHERE id IN (" + sb1.toString() + ")"; // create sql 
 			try ( PreparedStatement pstmt1 = db.prepareStatement(sql1)) {	// check if any already have global id
-				//pstmt1.setFetchSize(500);				//number of rows to be fetched when needed
+				pstmt1.setFetchSize(100);				//number of rows to be fetched when needed
 				ResultSet resultSet = pstmt1.executeQuery();
 				while (resultSet.next()) {				// get max global Id from this group
 					Integer currGlobalId = resultSet.getInt("globalId");
@@ -794,10 +765,32 @@ public class GlobalMatchSqlite {
 				maxGlobalId = globalId.incrementAndGet();	// get next global Id
 				assignedGlobalIds++;	// increment count
 			}
-			for (Integer num : patSet) {	// loop thru each pat in set to update global id
+			
+			GlobalIdGroup currGroup = new GlobalIdGroup();
+			currGroup.groupGlobalId = maxGlobalId;			// save globalId and this pat set
+			currGroup.groupSet = patSet;
+			globalIdArray.add(currGroup);
+		}
+		
+		// have matching patient groups with group globalId so update each pat with assigned globalId
+		patIdArray.clear();				// clear array to save memory
+		doAutoCommit(false);			// turn off AutoCommit to make storing faster
+		final int batchSize = 1000;		// number of updates before commits
+		int commitCount = 0;
+		
+		for (int k = 0; k < globalIdArray.size(); k++ ) {
+			if ( k % 25000 == 0) {
+				tempMessage = "updating globalId for matching patient group " + k;
+				writeLog(logInfo, tempMessage, true);
+			}
+			GlobalIdGroup nextGroup = globalIdArray.get( k );	// get next set of matched patients
+			Integer nextGlobalId = nextGroup.groupGlobalId;
+			Set<Integer> nextSet = nextGroup.groupSet;
+			
+			for (Integer num : nextSet) {	// loop thru each pat in set to update global id
 				String sql2 = "UPDATE GlobalMatch SET globalId = ? WHERE id = ?";
 				try ( PreparedStatement pstmt2 = db.prepareStatement(sql2)) {
-					pstmt2.setInt(1, maxGlobalId);		// set corresponding params
+					pstmt2.setInt(1, nextGlobalId);		// set corresponding params
 					pstmt2.setInt(2, num);
 					pstmt2.executeUpdate();				// update this record 
 					
@@ -1043,15 +1036,15 @@ public class GlobalMatchSqlite {
 						writeLog(logInfo, tempMessage, true);
 					}
 				}
+				if (resultSet != null) {
+					resultSet.close();
+				}
 				if (currGlobalIdGroup != null && !currGlobalIdGroup.isEmpty()) {	// if have entry, then save
 					addToGlobalIdGroup( currGlobalIdGroup );
 					currGlobalIdGroup.clear();					// clear list for next match
 				}
 				tempMessage = "Match Rule 0 " +colName[k]+ " records processed: " + recordsRead + "  matches found: " + patientMatches;
 				writeLog(logInfo, tempMessage, true);
-				if (resultSet != null) {
-					resultSet.close();
-				}
 			} catch (SQLException e1) {
 				System.out.println(e1.getMessage());
 				if (e1.getMessage().contains(SQL_Exception1)) { stopProcess(e1.getMessage()); }
@@ -1062,10 +1055,33 @@ public class GlobalMatchSqlite {
 	}
 
 	private void addToGlobalIdGroup(ArrayList<Integer> globalIdGroup) {
-		Set<Integer> setConsolidated = new HashSet<Integer>(globalIdGroup);		// convert to set to remove dups
-		patGlobalIdCount++;
-		patGlobalIdMap.put(patGlobalIdCount, setConsolidated);		// save to map of matched patients
-		//patGlobalIdMap.forEach((k, v) -> System.out.println((k + ":" + v)));	// print out - Java 8
+		Set<Integer> nextPatSet = new HashSet<Integer>(globalIdGroup);		// convert to set to remove dups
+		
+		boolean entryNotFound = true;
+		for (Integer nextPat : nextPatSet) {
+			if (patGlobalIdMapLink.containsKey(nextPat)) {				// see if previous link for this pat
+				Integer linkId = patGlobalIdMapLink.get(nextPat);		// if so get link to patGlobalIdMap
+				Set<Integer> updatePatSet = patGlobalIdMap.get(linkId); // get existing pat set map entry
+				updatePatSet.addAll(nextPatSet);			// add all pats in incoming set, removes duplicates
+				patGlobalIdMap.put(linkId, updatePatSet);	// save updated set back into same map location
+				savePatGlobalIdMapLink(linkId, nextPatSet);	// save map link for all pats in incoming set
+				entryNotFound = false;
+				break;										// exit loop since entry found
+			}
+		}
+		
+		if (entryNotFound) {										// if no previous entry found
+			patGlobalIdCount++;
+			patGlobalIdMap.put(patGlobalIdCount, nextPatSet);		// put new entry of matched patients in map
+			savePatGlobalIdMapLink(patGlobalIdCount, nextPatSet);	// save map link for all pats in set
+		}
+	}
+
+	// save link to patGlobalIdMap entry for all pats in set
+	private void savePatGlobalIdMapLink(Integer tempLinkId, Set<Integer> tempPatSet) {
+		for (Integer tempPatId : tempPatSet) {				// for all patients in set
+			patGlobalIdMapLink.put(tempPatId, tempLinkId);	// adds if new or updates if existed previously
+		}
 	}
 
 	private void runGlobalMatchRule1(boolean keySame) {
@@ -1136,6 +1152,9 @@ public class GlobalMatchSqlite {
 						tempMessage = "Match Rule 1 " +colName[k]+ " records processed: " + recordsRead + "  matches found: " + patientMatches;
 						writeLog(logInfo, tempMessage, true);
 					}
+				}
+				if (resultSet != null) {
+					resultSet.close();
 				}
 				if (currGlobalIdGroup != null && !currGlobalIdGroup.isEmpty()) {	// if have entry, then save
 					addToGlobalIdGroup( currGlobalIdGroup );
@@ -1220,15 +1239,15 @@ public class GlobalMatchSqlite {
 						writeLog(logInfo, tempMessage, true);
 					}
 				}
+				if (resultSet != null) {
+					resultSet.close();
+				}
 				if (currGlobalIdGroup != null && !currGlobalIdGroup.isEmpty()) {	// if have entry, then save
 					addToGlobalIdGroup( currGlobalIdGroup );
 					currGlobalIdGroup.clear();					// clear list for next match
 				}
 				tempMessage = "Match Rule 2 " +colName[k]+ " records processed: " + recordsRead + "  matches found: " + patientMatches;
 				writeLog(logInfo, tempMessage, true);
-				if (resultSet != null) {
-					resultSet.close();
-				}
 			} catch (SQLException e1) {
 				System.out.println(e1.getMessage());
 				if (e1.getMessage().contains(SQL_Exception1)) { stopProcess(e1.getMessage()); }
@@ -1293,6 +1312,9 @@ public class GlobalMatchSqlite {
 					writeLog(logInfo, tempMessage, true);
 				}
 			}
+			if (resultSet != null) {
+				resultSet.close();
+			}
 			if (currGlobalIdGroup != null && !currGlobalIdGroup.isEmpty()) {	// if have entry, then save
 				addToGlobalIdGroup( currGlobalIdGroup );
 				currGlobalIdGroup.clear();					// clear list for next match
@@ -1341,18 +1363,18 @@ public class GlobalMatchSqlite {
 							patientMatches++;
 						}
 					}
+					if (rset9 != null) { rset9.close(); }
 					if (currGlobalIdGroup !=null && !currGlobalIdGroup.isEmpty()) {	// if have entry, then save
 						addToGlobalIdGroup( currGlobalIdGroup );
 						currGlobalIdGroup.clear();  // clear list for next match
 					}
-					if (rset9 != null) { rset9.close(); }
 				}
 			}
-			tempMessage = "Match Rule 4 found: " + patientMatches + " patient matches";
-			writeLog(logInfo, tempMessage, true);
 			if (resultSet != null) {
 				resultSet.close();
 			}
+			tempMessage = "Match Rule 4 found: " + patientMatches + " patient matches";
+			writeLog(logInfo, tempMessage, true);
 		} catch (SQLException e1) {
 			System.out.println(e1.getMessage());
 			if (e1.getMessage().contains(SQL_Exception1)) { stopProcess(e1.getMessage()); }
@@ -1392,18 +1414,18 @@ public class GlobalMatchSqlite {
 							patientMatches++;
 						}
 					}
+					if (rset9 != null) { rset9.close(); }
 					if (currGlobalIdGroup !=null && !currGlobalIdGroup.isEmpty()) {	// if have entry, then save
 						addToGlobalIdGroup( currGlobalIdGroup );
 						currGlobalIdGroup.clear();  // clear list for next match
 					}
-					if (rset9 != null) { rset9.close(); }
 				} 
 			}
-			tempMessage = "Match Rule 5 found: " + patientMatches + " patient matches";
-			writeLog(logInfo, tempMessage, true);
 			if (resultSet != null) {
 				resultSet.close();
 			}
+			tempMessage = "Match Rule 5 found: " + patientMatches + " patient matches";
+			writeLog(logInfo, tempMessage, true);
 		} catch (SQLException e1) {
 			System.out.println(e1.getMessage());
 			if (e1.getMessage().contains(SQL_Exception1)) { stopProcess(e1.getMessage()); }
@@ -1443,18 +1465,18 @@ public class GlobalMatchSqlite {
 							patientMatches++;
 						}
 					}
+					if (rset9 != null) { rset9.close(); }
 					if (currGlobalIdGroup !=null && !currGlobalIdGroup.isEmpty()) {	// if have entry, then save
 						addToGlobalIdGroup( currGlobalIdGroup );
 						currGlobalIdGroup.clear();  // clear list for next match
 					}
-					if (rset9 != null) { rset9.close(); }
 				} 
 			}
-			tempMessage = "Match Rule 6 found: " + patientMatches + " patient matches";
-			writeLog(logInfo, tempMessage, true);
 			if (resultSet != null) {
 				resultSet.close();
 			}
+			tempMessage = "Match Rule 6 found: " + patientMatches + " patient matches";
+			writeLog(logInfo, tempMessage, true);
 		} catch (SQLException e1) {
 			System.out.println(e1.getMessage());
 			if (e1.getMessage().contains(SQL_Exception1)) { stopProcess(e1.getMessage()); }
@@ -1494,18 +1516,18 @@ public class GlobalMatchSqlite {
 							patientMatches++;
 						}
 					}
+					if (rset9 != null) { rset9.close(); }
 					if (currGlobalIdGroup !=null && !currGlobalIdGroup.isEmpty()) {	// if have entry, then save
 						addToGlobalIdGroup( currGlobalIdGroup );
 						currGlobalIdGroup.clear();  // clear list for next match
 					}
-					if (rset9 != null) { rset9.close(); }
 				} 
 			}
-			tempMessage = "Match Rule 7 found: " + patientMatches + " patient matches";
-			writeLog(logInfo, tempMessage, true);
 			if (resultSet != null) {
 				resultSet.close();
 			}
+			tempMessage = "Match Rule 7 found: " + patientMatches + " patient matches";
+			writeLog(logInfo, tempMessage, true);
 		} catch (SQLException e1) {
 			System.out.println(e1.getMessage());
 			if (e1.getMessage().contains(SQL_Exception1)) { stopProcess(e1.getMessage()); }
@@ -1568,15 +1590,15 @@ public class GlobalMatchSqlite {
 					writeLog(logInfo, tempMessage, true);
 				}
 			}
+			if (resultSet != null) {
+				resultSet.close();
+			}
 			if (currGlobalIdGroup != null && !currGlobalIdGroup.isEmpty()) {	// if have entry, then save
 				addToGlobalIdGroup( currGlobalIdGroup );
 				currGlobalIdGroup.clear();					// clear list for next match
 			}
 			tempMessage = "Match Rule 8 records processed: " + recordsRead + "  matches found: " + patientMatches;
 			writeLog(logInfo, tempMessage, true);
-			if (resultSet != null) {
-				resultSet.close();
-			}
 		} catch (SQLException e1) {
 			System.out.println(e1.getMessage());
 			if (e1.getMessage().contains(SQL_Exception1)) { stopProcess(e1.getMessage()); }
@@ -1616,18 +1638,18 @@ public class GlobalMatchSqlite {
 							patientMatches++;
 						}
 					}
+					if (rset9 != null) { rset9.close(); }
 					if (currGlobalIdGroup !=null && !currGlobalIdGroup.isEmpty()) {	// if have entry, then save
 						addToGlobalIdGroup( currGlobalIdGroup );
 						currGlobalIdGroup.clear();  // clear list for next match
 					}
-					if (rset9 != null) { rset9.close(); }
 				} 
 			}
-			tempMessage = "Match Rule 9 found: " + patientMatches + " patient matches";
-			writeLog(logInfo, tempMessage, true);
 			if (resultSet != null) {
 				resultSet.close();
 			}
+			tempMessage = "Match Rule 9 found: " + patientMatches + " patient matches";
+			writeLog(logInfo, tempMessage, true);
 		} catch (SQLException e1) {
 			System.out.println(e1.getMessage());
 			if (e1.getMessage().contains(SQL_Exception1)) { stopProcess(e1.getMessage()); }
@@ -1667,18 +1689,18 @@ public class GlobalMatchSqlite {
 							patientMatches++;
 						}
 					}
+					if (rset9 != null) { rset9.close(); }
 					if (currGlobalIdGroup !=null && !currGlobalIdGroup.isEmpty()) {	// if have entry, then save
 						addToGlobalIdGroup( currGlobalIdGroup );
 						currGlobalIdGroup.clear();  // clear list for next match
 					}
-					if (rset9 != null) { rset9.close(); }
 				}
 			}
-			tempMessage = "Match Rule 10 found: " + patientMatches + " patient matches";
-			writeLog(logInfo, tempMessage, true);
 			if (resultSet != null) {
 				resultSet.close();
 			}
+			tempMessage = "Match Rule 10 found: " + patientMatches + " patient matches";
+			writeLog(logInfo, tempMessage, true);
 		} catch (SQLException e1) {
 			System.out.println(e1.getMessage());
 			if (e1.getMessage().contains(SQL_Exception1)) { stopProcess(e1.getMessage()); }
@@ -1741,15 +1763,15 @@ public class GlobalMatchSqlite {
 					writeLog(logInfo, tempMessage, true);
 				}
 			}
+			if (resultSet != null) {
+				resultSet.close();
+			}
 			if (currGlobalIdGroup != null && !currGlobalIdGroup.isEmpty()) {	// if have entry, then save
 				addToGlobalIdGroup( currGlobalIdGroup );
 				currGlobalIdGroup.clear();					// clear list for next match
 			}
 			tempMessage = "Match Rule 11 records processed: " + recordsRead + "  matches found: " + patientMatches;
 			writeLog(logInfo, tempMessage, true);
-			if (resultSet != null) {
-				resultSet.close();
-			}
 		} catch (SQLException e1) {
 			System.out.println(e1.getMessage());
 			if (e1.getMessage().contains(SQL_Exception1)) { stopProcess(e1.getMessage()); }
@@ -1812,15 +1834,15 @@ public class GlobalMatchSqlite {
 					writeLog(logInfo, tempMessage, true);
 				}
 			}
+			if (resultSet != null) {
+				resultSet.close();
+			}
 			if (currGlobalIdGroup != null && !currGlobalIdGroup.isEmpty()) {	// if have entry, then save
 				addToGlobalIdGroup( currGlobalIdGroup );
 				currGlobalIdGroup.clear();					// clear list for next match
 			}
 			tempMessage = "Match Rule 12 records processed: " + recordsRead + "  matches found: " + patientMatches;
 			writeLog(logInfo, tempMessage, true);
-			if (resultSet != null) {
-				resultSet.close();
-			}
 		} catch (SQLException e1) {
 			System.out.println(e1.getMessage());
 			if (e1.getMessage().contains(SQL_Exception1)) { stopProcess(e1.getMessage()); }
@@ -2126,11 +2148,11 @@ public class GlobalMatchSqlite {
 					}
 					out.println(rs1.getString("siteId")+","+rs1.getString("projectId")+","+rs1.getString("pidhash")+","+rs1.getInt("globalId"));
 				}
+				if (rs1 != null) { rs1.close(); }
 				
 				for (String line : exclusionPats) {		// add on excluded pats at end
 					out.println(line);
 				}
-				if (rs1 != null) { rs1.close(); }
 			} catch (SQLException e) {
 				System.out.println(e.getMessage());
 				if (e.getMessage().contains(SQL_Exception1)) { stopProcess(e.getMessage()); }
@@ -2289,20 +2311,6 @@ public class GlobalMatchSqlite {
 		tempTableAllKeyCreated = true;
 		tempMessage = "created indexes on Temporary table " + TempTableAllKey;
 		writeLog(logInfo, tempMessage, true);
-
-		/*
-		System.out.println("-----------------------");
-		try ( PreparedStatement pstmt9 = db.prepareStatement("SELECT * FROM " + TempTableAllKey + " LIMIT 20")) {
-			ResultSet rset9 = pstmt9.executeQuery();
-			while (rset9.next()) {
-				System.out.println("temp: " +" rowId: "+rset9.getInt("rowId")+"  "+ rset9.getString("hash1") );
-			}
-			if (rset9 != null) { rset9.close(); }
-		} catch (SQLException e) {
-			System.out.println(e.getMessage());
-			if (e.getMessage().contains(SQL_Exception1)) { stopProcess(e.getMessage()); }
-		}
-		 */
 	}
 
 	public void stopProcess(String errorMessage) {
@@ -2357,9 +2365,6 @@ public class GlobalMatchSqlite {
 			System.out.println("Valid params: Project Root,  Step number: 1=process input files and 2=run match rules.");
 			System.exit(-1);
 		}
-
-		//processStep = 1;	//****** testing
-		//processStep = 2;
 
 		if (processStep <= 0 || processStep > 3) {
 			System.out.println("Valid params: Project Root,  Step number: 1=process input files and 2=run match rules.");
