@@ -41,7 +41,7 @@ import org.sqlite.SQLiteException;
 public class GlobalMatchSqlite {
 
 	private static final String SW_NAME    = "Global Patient Match";
-	private static final String SW_VERSION = " v1.0.beta";
+	private static final String SW_VERSION = " v1.1.beta";
 	private static final String SQL_Exception1 = "SQLITE_BUSY";
 	//private static final String File_Extension_CSV = ".csv";
 	private static final String File_Extension_TXT = ".txt";
@@ -81,7 +81,7 @@ public class GlobalMatchSqlite {
 	private static int hash8Idx = 10;
 	private static int hash9Idx = 11;
 	private static int hash10Idx = 12;
-	private static int exceptFlagIdx = 13;
+	//private static int exceptFlagIdx = 13;
 	private static int recordsToSkip = 1;
 	private static AtomicInteger globalId;
 	private static int atomicIntegerSeed;
@@ -250,9 +250,9 @@ public class GlobalMatchSqlite {
 					String[] splitLine;
 					String lineIn = line.trim().replaceAll("\\s+", " "); // reduce multiple spaces to single space
 					if (useCommaDelim) {
-						splitLine = lineIn.split(delimComma);	//split incoming text by , delimiter
+						splitLine = lineIn.split(delimComma, -1);	//split incoming text by , delimiter - -1 means even blanks at end
 					} else {
-						splitLine = lineIn.split("\\|");		//split incoming text by | delimiter
+						splitLine = lineIn.split("\\|", -1);		//split incoming text by | delimiter
 					}
 
 					// check that primary data is valid  - site id, project id and pidhash must be filled in
@@ -266,21 +266,19 @@ public class GlobalMatchSqlite {
 					if (splitLine[pidhashIdx] == null || splitLine[pidhashIdx].isEmpty() || splitLine[pidhashIdx].equals("NULL")) {
 						validData = false;
 					}
-					if (splitLine.length <= exceptFlagIdx || splitLine[exceptFlagIdx] == null || splitLine[exceptFlagIdx].isEmpty()) {
-						validData = false;
-					} else if (!splitLine[exceptFlagIdx].equals("0")) {
-						exclusionPats.add(lineIn);		// add this record to exclusionPats
-						continue;						// skip to next record
-					}
-					/* columns hash1 and up can be null or empty */
 					if (!validData) {
 						writeInvalidData( invalidDataFile, lineIn );	// write out bad data for later
 						continue;			// skip to next record
 					}
+					// check if patient should be excluded from matching
+					if (splitLine[hash3Idx].isEmpty() && splitLine[hash4Idx].isEmpty()) {
+						exclusionPats.add(lineIn);		// add this record to exclusionPats
+						continue;						// skip to next record
+					}
 
 					String sql = "INSERT INTO InclusionPatients ("
-							+"siteId,projectId,pidhash,hash1,hash2,hash3,hash4,hash5,hash6,hash7,hash8,hash9,hash10,exclusion,globalId) "
-							+ "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+							+"siteId,projectId,pidhash,hash1,hash2,hash3,hash4,hash5,hash6,hash7,hash8,hash9,hash10,globalId) "
+							+ "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
 					try ( PreparedStatement pstmt = db.prepareStatement(sql)) {
 						pstmt.setString(1, splitLine[siteidIdx]);
@@ -296,8 +294,7 @@ public class GlobalMatchSqlite {
 						pstmt.setString(11, splitLine[hash8Idx]);
 						pstmt.setString(12, splitLine[hash9Idx]);
 						pstmt.setString(13, splitLine[hash10Idx]);
-						pstmt.setString(14, splitLine[exceptFlagIdx]);
-						pstmt.setInt(15, 0);
+						pstmt.setInt(14, 0);
 
 						pstmt.executeUpdate();			// store data to database
 						commitCount++;
@@ -312,6 +309,7 @@ public class GlobalMatchSqlite {
 						writeLog(logInfo, recordsRead+" records read", true);
 					}
 				}
+				System.out.println("after commitCount: " + commitCount);
 				if (commitCount > 0) {
 					try {
 						db.commit();
@@ -359,13 +357,13 @@ public class GlobalMatchSqlite {
 		for (String entry : exclusionPats) {
 			String[] splitLine = null;
 			if (entry.contains(delimComma)) {
-				splitLine = entry.split(delimComma);	//split incoming text by , delimiter
+				splitLine = entry.split(delimComma, -1);	//split incoming text by , delimiter - -1 means even blanks at end
 			} else {
-				splitLine = entry.split("\\|");			//split incoming text by | delimiter
+				splitLine = entry.split("\\|", -1);			//split incoming text by | delimiter
 			}
 			String sql = "INSERT INTO ExclusionPatients ("
-				+"globalId,siteId,projectId,pidhash,hash1,hash2,hash3,hash4,hash5,hash6,hash7,hash8,hash9,hash10,exclusion) "
-				+ "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+				+"globalId,siteId,projectId,pidhash,hash1,hash2,hash3,hash4,hash5,hash6,hash7,hash8,hash9,hash10) "
+				+ "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
 			try ( PreparedStatement pstmt = db.prepareStatement(sql)) {
 				pstmt.setInt(1, 0);
@@ -382,7 +380,6 @@ public class GlobalMatchSqlite {
 				pstmt.setString(12, splitLine[hash8Idx]);
 				pstmt.setString(13, splitLine[hash9Idx]);
 				pstmt.setString(14, splitLine[hash10Idx]);
-				pstmt.setString(15, splitLine[exceptFlagIdx]);
 				
 				pstmt.executeUpdate();			// store to database
 			} catch (SQLException e) {
@@ -497,10 +494,10 @@ public class GlobalMatchSqlite {
 		dropIndexGlobalMatchTable();	// drop indexes for faster insert
 		doAutoCommit(false);			// turn off AutoCommit to make storing faster
 
-		String sql1 = "SELECT globalId,siteId,projectId,pidhash,hash1,hash2,hash3,hash4,hash5,hash6,hash7,hash8,hash9,hash10,exclusion FROM InclusionPatients";
+		String sql1 = "SELECT globalId,siteId,projectId,pidhash,hash1,hash2,hash3,hash4,hash5,hash6,hash7,hash8,hash9,hash10 FROM InclusionPatients";
 		String sql2 = "INSERT INTO GlobalMatch ("
-						+ "globalId,siteId,projectId,pidhash,hash1,hash2,hash3,hash4,hash5,hash6,hash7,hash8,hash9,hash10,exclusion) "
-						+ "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+						+ "globalId,siteId,projectId,pidhash,hash1,hash2,hash3,hash4,hash5,hash6,hash7,hash8,hash9,hash10) "
+						+ "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
 		try (	PreparedStatement pstmt1 = db.prepareStatement(sql1);
 				PreparedStatement pstmt2 = db.prepareStatement(sql2) ) {
@@ -523,7 +520,6 @@ public class GlobalMatchSqlite {
 				pstmt2.setString(12, resultSet1.getString("hash8"));
 				pstmt2.setString(13, resultSet1.getString("hash9"));
 				pstmt2.setString(14, resultSet1.getString("hash10"));
-				pstmt2.setString(15, resultSet1.getString("exclusion"));
 
 				pstmt2.executeUpdate();			// store data to database
 				commitCount++;
@@ -931,7 +927,7 @@ public class GlobalMatchSqlite {
 			Integer nextGlobalId = globalId.incrementAndGet();	// get next global id
 			patAliasLastGlobalId = nextGlobalId;
 
-			String[] keyPart = patPidKey.split("\\|");	// split key
+			String[] keyPart = patPidKey.split("\\|", -1);	// split key
 
 			String sql2 = "UPDATE GlobalMatch INDEXED BY pidindex "
 					+ "SET globalId = ? WHERE pidhash = ? AND siteId = ? AND projectId = ?";
@@ -1975,7 +1971,6 @@ public class GlobalMatchSqlite {
 		return success;
 	}
 
-
 	private void readConfig(String projRoot) {
 		
 		configFilePath = makeFilePath(makeFilePath(projRoot, "config"), configFileName);  	// get config path
@@ -2382,7 +2377,7 @@ public class GlobalMatchSqlite {
 		
 		if (!tempMatchRules.isEmpty()) {	// if match rules passed in
 			matchSequence.clear();			// clear those read from properties file
-			String[] tempArr = tempMatchRules.split(delimComma);	// split incoming text
+			String[] tempArr = tempMatchRules.split(delimComma, -1);	// split incoming text
 			for (int i = 0; i < tempArr.length; i++) {	
 				matchSequence.add( Integer.parseInt(tempArr[i]) );	// save match sequence as integer
 			}
